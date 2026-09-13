@@ -1,0 +1,23 @@
+{
+  "status_interval_seconds": 10,
+  "restart_cooldown_seconds": 20,
+  "startup_grace_seconds": 60,
+  "log_tail_lines": 200,
+  "fatal_patterns": [
+    "EngineDeadError",
+    "EngineCore encountered a fatal error.",
+    "Parent process exited, terminating worker queues",
+    "Shutting down",
+    "Waiting for application shutdown.",
+    "Application shutdown complete.",
+    "send sigterm to process EngineCore",
+    "force killing remaining processes",
+    "RPC call to sample_tokens timed out"
+  ],
+  "models": [
+    {
+      "recipe": "@namespace/recipe-name",
+      "launch_args": []
+    }
+  ]
+}

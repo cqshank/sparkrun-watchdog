@@ -1,0 +1,28 @@
+[Unit]
+Description=Supervise configured sparkrun recipes
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/sparkrun-watchdog.json
+
+[Service]
+Type=simple
+
+# Change User= if the service should run as a different account.
+User=chris
+
+# Add a PATH override in /etc/sparkrun-watchdog.env when needed.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/sparkrun-watchdog.env
+
+ExecStart=/usr/bin/python3 /opt/sparkrun-watchdog/sparkrun_watchdog.py --config /etc/sparkrun-watchdog.json
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=30
+SyslogIdentifier=sparkrun-watchdog
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
