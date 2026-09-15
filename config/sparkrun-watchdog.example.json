@@ -6,6 +6,7 @@
   "fatal_patterns": [
     "EngineDeadError",
     "EngineCore encountered a fatal error.",
+    "EngineCore failed to start.",
     "Parent process exited, terminating worker queues",
     "Shutting down",
     "Waiting for application shutdown.",
@@ -14,6 +15,8 @@
     "force killing remaining processes",
     "RPC call to sample_tokens timed out"
   ],
+  "post_restart_timeout_seconds": 30,
+  "post_restart_command": [],
   "models": [
     {
       "recipe": "@namespace/recipe-name",

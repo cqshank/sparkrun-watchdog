@@ -18,6 +18,8 @@ status.
   duplicate workloads during a temporary control-plane failure.
 - Preserve the startup grace period, restart cooldown, and stale-log race
   guard when changing restart behavior.
+- A post-restart command failure, timeout, or missing command must not
+  change whether a recipe is stopped or launched.
 - Do not put real recipes, credentials, hostnames, or infrastructure details
   in tests, examples, or documentation.
 - Update the tests and README when changing configuration keys or lifecycle
