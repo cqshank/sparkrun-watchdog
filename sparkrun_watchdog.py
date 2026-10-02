@@ -178,13 +178,30 @@ class SparkRunWatchdog:
         capture_output: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Run an external command without invoking a shell."""
-        LOG.debug("running command: %s", " ".join(args))
-        return subprocess.run(
-            args,
-            text=True,
-            capture_output=capture_output,
-            check=False,
+        started_at = time.monotonic()
+        command_text = " ".join(args)
+        LOG.debug("command started: %s", command_text)
+        try:
+            result = subprocess.run(
+                args,
+                text=True,
+                capture_output=capture_output,
+                check=False,
+            )
+        except OSError:
+            LOG.debug(
+                "command failed to start: %s (elapsed=%.3fs)",
+                command_text,
+                time.monotonic() - started_at,
+            )
+            raise
+        LOG.debug(
+            "command completed: %s rc=%d elapsed=%.3fs",
+            command_text,
+            result.returncode,
+            time.monotonic() - started_at,
         )
+        return result
 
     def get_status(self) -> Optional[dict[str, Any]]:
         """Return sparkrun status, or None when the status is unavailable."""
@@ -201,7 +218,11 @@ class SparkRunWatchdog:
                 )
                 return None
             parsed = json.loads(result.stdout)
-            return parsed if isinstance(parsed, dict) else None
+            if not isinstance(parsed, dict):
+                LOG.error("sparkrun status returned JSON that is not an object")
+                return None
+            LOG.debug("sparkrun status response parsed successfully")
+            return parsed
         except json.JSONDecodeError as exc:
             LOG.error("invalid JSON from sparkrun status: %s", exc)
         except OSError:
@@ -292,8 +313,7 @@ class SparkRunWatchdog:
             LOG.exception("[%s] launch command failed", recipe)
             return False
 
-        matched = self._inspect_output(
-            recipe,
+        matched, matching_line = self._inspect_output(
             result.stdout or "",
             result.stderr or "",
         )
@@ -301,9 +321,11 @@ class SparkRunWatchdog:
             state.launch_fatal_pattern = matched
         if matched:
             LOG.error(
-                "[%s] fatal log signature detected during launch: %r",
+                "[%s] launch not accepted: fatal log signature %r; "
+                "matching line: %s",
                 recipe,
                 matched,
+                matching_line,
             )
             return False
 
@@ -314,6 +336,7 @@ class SparkRunWatchdog:
             now = time.monotonic()
             state.launched_at = now
             state.run_observed_at = now
+        LOG.info("[%s] launch command succeeded; awaiting run discovery", recipe)
         return True
 
     def stop_run(self, state: ModelState, run_id: str) -> bool:
@@ -327,6 +350,7 @@ class SparkRunWatchdog:
         if result.returncode != 0:
             LOG.error("[%s] sparkrun stop returned rc=%d", recipe, result.returncode)
             return False
+        LOG.info("[%s] stopped run %s", recipe, run_id)
         return True
 
     def _terminate_process(
@@ -371,7 +395,7 @@ class SparkRunWatchdog:
             self._terminate_process(existing_process, state.config.recipe)
 
         recipe = state.config.recipe
-        LOG.info("[%s] following logs for run %s", recipe, run_id)
+        LOG.info("[%s] starting log follower for run %s", recipe, run_id)
         try:
             process = subprocess.Popen(
                 [
@@ -402,6 +426,11 @@ class SparkRunWatchdog:
 
         if not can_attach:
             self._terminate_process(process, recipe)
+            LOG.debug(
+                "[%s] discarded log follower for run %s because state changed",
+                recipe,
+                run_id,
+            )
             return
 
         thread = threading.Thread(
@@ -411,6 +440,7 @@ class SparkRunWatchdog:
             name=f"log-{recipe}",
         )
         thread.start()
+        LOG.info("[%s] log follower attached to run %s", recipe, run_id)
 
     def log_reader(
         self,
@@ -425,10 +455,14 @@ class SparkRunWatchdog:
                 if self.shutdown_event.is_set():
                     break
                 line = raw_line.rstrip()
-                LOG.info("[%s] %s", recipe, line)
                 matched = self._match_fatal_pattern(line)
                 if matched:
-                    LOG.error("[%s] fatal log signature detected: %r", recipe, matched)
+                    LOG.error(
+                        "[%s] fatal log signature detected: %r; matching line: %s",
+                        recipe,
+                        matched,
+                        line,
+                    )
                     self.request_restart(
                         state,
                         reason=f"log signature: {matched}",
@@ -461,18 +495,16 @@ class SparkRunWatchdog:
 
     def _inspect_output(
         self,
-        recipe: str,
         stdout: str,
         stderr: str,
-    ) -> Optional[str]:
-        """Forward and inspect captured stdout and stderr from a command."""
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Inspect captured command output without forwarding ordinary lines."""
         for output in (stdout, stderr):
             for line in output.splitlines():
-                LOG.info("[%s] %s", recipe, line)
                 matched = self._match_fatal_pattern(line)
                 if matched:
-                    return matched
-        return None
+                    return matched, line
+        return None, None
 
     def request_restart(
         self,
@@ -554,24 +586,14 @@ class SparkRunWatchdog:
             LOG.exception("[%s] post-restart action failed to start", event.recipe)
             return
 
-        if result.stdout:
-            LOG.info(
-                "[%s] post-restart action stdout: %s",
-                event.recipe,
-                result.stdout.strip(),
-            )
-        if result.stderr:
-            LOG.warning(
-                "[%s] post-restart action stderr: %s",
-                event.recipe,
-                result.stderr.strip(),
-            )
         if result.returncode != 0:
             LOG.error(
                 "[%s] post-restart action exited rc=%d",
                 event.recipe,
                 result.returncode,
             )
+        else:
+            LOG.info("[%s] post-restart action completed rc=0", event.recipe)
 
     def restart_model(
         self,
@@ -629,6 +651,12 @@ class SparkRunWatchdog:
             launch_fatal_pattern: Optional[str] = None
 
             def emit_post_restart() -> None:
+                LOG.info(
+                    "[%s] restart attempt completed: stop=%s launch=%s",
+                    recipe,
+                    outcome_text(stop_succeeded),
+                    outcome_text(launch_succeeded),
+                )
                 self.run_post_restart_action(
                     state,
                     RestartEvent(
@@ -728,6 +756,11 @@ class SparkRunWatchdog:
             return
 
         discovered = self.discover_runs(status)
+        LOG.debug(
+            "status reconciliation found %d run(s) for %d configured recipe(s)",
+            len(discovered),
+            len(self.models),
+        )
         for recipe, state in self.models.items():
             with state.state_lock:
                 if state.restart_pending:
@@ -749,6 +782,10 @@ class SparkRunWatchdog:
                         self.startup_grace,
                     )
                     continue
+                LOG.warning(
+                    "[%s] absent from status beyond startup grace; requesting restart",
+                    recipe,
+                )
                 self.request_restart(
                     state,
                     reason="recipe missing from sparkrun status",
@@ -784,6 +821,12 @@ class SparkRunWatchdog:
             elif follower_missing:
                 LOG.warning("[%s] log follower absent; reattaching", recipe)
                 self.start_log_follower(state)
+            else:
+                LOG.debug(
+                    "[%s] status confirms run %s; log follower is active",
+                    recipe,
+                    new_run_id,
+                )
 
     def run(self) -> None:
         LOG.info("watching %d recipe(s)", len(self.models))

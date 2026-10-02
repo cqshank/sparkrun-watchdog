@@ -20,6 +20,14 @@ status.
   guard when changing restart behavior.
 - A post-restart command failure, timeout, or missing command must not
   change whether a recipe is stopped or launched.
+- Do not copy ordinary workload log lines or successful hook stdout/stderr into
+  watchdog logs. Inspect workload output for configured fatal patterns and log
+  the matching line when one is found.
+- Apply consistent lifecycle logging: when an operational action or command is
+  logged as starting/requested, log its terminal outcome (success, failure,
+  skipped, or timeout) at an appropriate level. Pair command invocation logs
+  with completion results, and log the status-query/reconciliation decision;
+  do not leave routine command starts or workload launches without outcomes.
 - Do not put real recipes, credentials, hostnames, or infrastructure details
   in tests, examples, or documentation.
 - Update the tests and README when changing configuration keys or lifecycle

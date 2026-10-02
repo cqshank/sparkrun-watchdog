@@ -92,9 +92,18 @@ class SparkRunWatchdogTests(unittest.TestCase):
     def test_launch_model_preserves_recipe_arguments(self):
         watchdog = self.make_watchdog()
         state = watchdog.models["@namespace/model"]
-        completed = subprocess.CompletedProcess([], 0)
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="ordinary workload output\n",
+            stderr="ordinary diagnostic output\n",
+        )
 
-        with patch.object(watchdog, "command", return_value=completed) as command:
+        with self.assertLogs("sparkrun-watchdog", level="INFO") as captured, patch.object(
+            watchdog,
+            "command",
+            return_value=completed,
+        ) as command:
             self.assertTrue(watchdog.launch_model(state))
 
         command.assert_called_once_with(
@@ -110,6 +119,10 @@ class SparkRunWatchdogTests(unittest.TestCase):
         )
         self.assertIsNotNone(state.launched_at)
         self.assertEqual(state.run_observed_at, state.launched_at)
+        emitted = "\n".join(captured.output)
+        self.assertIn("launch command succeeded; awaiting run discovery", emitted)
+        self.assertNotIn("ordinary workload output", emitted)
+        self.assertNotIn("ordinary diagnostic output", emitted)
 
     def test_launch_model_matches_fatal_patterns_on_both_streams(self):
         watchdog = self.make_watchdog()
@@ -137,6 +150,43 @@ class SparkRunWatchdogTests(unittest.TestCase):
 
             self.assertEqual(state.launch_fatal_pattern, pattern)
             self.assertIsNone(state.launched_at)
+
+    def test_log_reader_suppresses_ordinary_lines_and_logs_only_a_match(self):
+        watchdog = self.make_watchdog()
+        state = watchdog.models["@namespace/model"]
+        process = Mock()
+        process.stdout = [
+            "ordinary workload line\n",
+            "EngineCore failed to start. details follow\n",
+            "later workload line\n",
+        ]
+        process.wait.return_value = 0
+
+        with self.assertLogs("sparkrun-watchdog", level="INFO") as captured, patch.object(
+            watchdog,
+            "request_restart",
+        ) as request_restart:
+            watchdog.log_reader(state, process, "run-123")
+
+        emitted = "\n".join(captured.output)
+        self.assertNotIn("ordinary workload line", emitted)
+        self.assertNotIn("later workload line", emitted)
+        self.assertIn("matching line: EngineCore failed to start. details follow", emitted)
+        request_restart.assert_called_once()
+
+    def test_command_debug_log_has_start_and_completion(self):
+        watchdog = self.make_watchdog()
+        result = subprocess.CompletedProcess(["sparkrun"], 0, stdout="", stderr="")
+
+        with self.assertLogs("sparkrun-watchdog", level="DEBUG") as captured, patch(
+            "sparkrun_watchdog.subprocess.run",
+            return_value=result,
+        ):
+            self.assertIs(watchdog.command(["sparkrun", "status", "--json"]), result)
+
+        emitted = "\n".join(captured.output)
+        self.assertIn("command started: sparkrun status --json", emitted)
+        self.assertIn("command completed: sparkrun status --json rc=0", emitted)
 
     @patch("sparkrun_watchdog.threading.Timer")
     def test_fatal_launch_output_retries_after_cooldown(self, timer):
@@ -208,6 +258,22 @@ class SparkRunWatchdogTests(unittest.TestCase):
             )
         )
         self.assertIsNone(watchdog.get_status())
+
+    def test_status_query_logs_successful_parse_decision(self):
+        watchdog = self.make_watchdog()
+        watchdog.command = Mock(
+            return_value=subprocess.CompletedProcess(
+                ["sparkrun"],
+                0,
+                stdout='{"groups": {}, "solo_entries": []}',
+                stderr="",
+            )
+        )
+
+        with self.assertLogs("sparkrun-watchdog", level="DEBUG") as captured:
+            self.assertEqual(watchdog.get_status(), {"groups": {}, "solo_entries": []})
+
+        self.assertIn("sparkrun status response parsed successfully", "\n".join(captured.output))
 
     @patch("sparkrun_watchdog.threading.Thread")
     @patch("sparkrun_watchdog.subprocess.Popen")
@@ -357,6 +423,34 @@ class SparkRunWatchdogTests(unittest.TestCase):
         )
         self.assertEqual(env["SPARKRUN_WATCHDOG_CLUSTER_ID"], "sparkrun_old-run")
         self.assertEqual(run.call_args.kwargs["timeout"], 30)
+
+    def test_post_restart_action_suppresses_successful_output(self):
+        watchdog = SparkRunWatchdog(
+            {
+                "post_restart_command": ["/notify"],
+                "models": [{"recipe": "@namespace/model", "launch_args": []}],
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            ["/notify"],
+            0,
+            stdout="hook stdout that should stay private",
+            stderr="hook stderr that should stay private",
+        )
+
+        with self.assertLogs("sparkrun-watchdog", level="INFO") as captured, patch(
+            "sparkrun_watchdog.subprocess.run",
+            return_value=completed,
+        ):
+            watchdog.run_post_restart_action(
+                watchdog.models["@namespace/model"],
+                self.make_restart_event(),
+            )
+
+        emitted = "\n".join(captured.output)
+        self.assertIn("post-restart action completed rc=0", emitted)
+        self.assertNotIn("hook stdout that should stay private", emitted)
+        self.assertNotIn("hook stderr that should stay private", emitted)
 
     def test_per_model_post_restart_command_overrides_global(self):
         watchdog = SparkRunWatchdog(

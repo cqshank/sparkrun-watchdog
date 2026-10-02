@@ -184,9 +184,14 @@ machine-specific configuration outside version control; the repository's
 The watchdog does not attempt to restart anything when `sparkrun status
 --json` fails or returns invalid JSON. It also checks the run ID before acting
 on a log-follower event so an old log stream cannot restart a newer run.
-The process forwards followed `sparkrun` output to its logger, so review
-journal retention and access policies if model logs may contain sensitive
-content. Post-restart commands inherit that same environment and can
+Routine workload log lines and successful post-restart command output are not
+copied into the watchdog log. A matching fatal line is recorded when detected;
+operational command and restart lifecycle outcomes are logged separately.
+At DEBUG level, command start/completion results and routine reconciliation
+decisions are visible without copying command output into the log.
+Matched fatal lines are retained in the watchdog log, so consider journal
+access and retention if those lines may contain sensitive content.
+Post-restart commands inherit the watchdog environment and can
 receive recipe names, run IDs, and matched log snippets; keep secrets out
 of hook arguments and treat hook output as potentially sensitive.
 
